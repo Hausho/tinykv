@@ -76,6 +76,7 @@ const (
 	MessageType_MsgTransferLeader MessageType = 11
 	// 'MessageType_MsgTimeoutNow' send from the leader to the leadership transfer target, to let
 	// the transfer target timeout immediately and start a new election.
+	// leader迁移时，当新旧leader的日志数据同步后，旧leader向新leader发送该消息通知可以进行迁移了
 	MessageType_MsgTimeoutNow MessageType = 12
 )
 

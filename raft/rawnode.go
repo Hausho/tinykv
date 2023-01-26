@@ -36,6 +36,7 @@ type SoftState struct {
 // Ready encapsulates the entries and messages that are ready to read,
 // be saved to stable storage, committed or sent to other peers.
 // All fields in Ready are read-only.
+// Ready 压缩了那些已经准备好被读取、存储到持久化设备、被提交或者被发送到其他peers的entries和msg，Ready中所有的字段都是只读的
 type Ready struct {
 	// The current volatile state of a Node.
 	// SoftState will be nil if there is no update.
@@ -70,12 +71,20 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
+	prevSoftState *SoftState
+	prevHardState pb.HardState
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
 func NewRawNode(config *Config) (*RawNode, error) {
 	// Your Code Here (2A).
-	return nil, nil
+	r := newRaft(config)
+	rn := &RawNode{
+		Raft:          r,
+		prevSoftState: r.softState(),
+		prevHardState: r.hardState(),
+	}
+	return rn, nil
 }
 
 // Tick advances the internal logical clock by a single tick.
@@ -84,6 +93,7 @@ func (rn *RawNode) Tick() {
 }
 
 // Campaign causes this RawNode to transition to candidate state.
+// 调用该函数将驱动节点进入候选人状态，进而将竞争leader
 func (rn *RawNode) Campaign() error {
 	return rn.Raft.Step(pb.Message{
 		MsgType: pb.MessageType_MsgHup,
@@ -91,6 +101,7 @@ func (rn *RawNode) Campaign() error {
 }
 
 // Propose proposes data be appended to the raft log.
+// 提议写入数据到日志中，可能会返回错误
 func (rn *RawNode) Propose(data []byte) error {
 	ent := pb.Entry{Data: data}
 	return rn.Raft.Step(pb.Message{
@@ -129,6 +140,7 @@ func (rn *RawNode) ApplyConfChange(cc pb.ConfChange) *pb.ConfState {
 }
 
 // Step advances the state machine using the given message.
+// 将消息msg灌入状态机中
 func (rn *RawNode) Step(m pb.Message) error {
 	// ignore unexpected local messages receiving over network
 	if IsLocalMsg(m.MsgType) {
@@ -141,21 +153,72 @@ func (rn *RawNode) Step(m pb.Message) error {
 }
 
 // Ready returns the current point-in-time state of this RawNode.
+// 这里是核心函数，将返回Ready的channel，应用层需要关注这个channel，当发生变更时将其中的数据进行操作
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
-	return Ready{}
+	r := rn.Raft
+	rd := Ready{
+		// entries保存的是没有持久化的数据数组
+		Entries: r.RaftLog.unstableEntries(),
+		// 保存committed但是还没有applied的数据数组
+		CommittedEntries: r.RaftLog.nextEnts(),
+		// 保存待发送的消息
+		Messages: r.msgs,
+	}
+
+	softState := r.softState()
+	hardState := r.hardState()
+	if !isSoftStateEqual(softState, rn.prevSoftState) {
+		//rn.prevSoftState = softState
+		rd.SoftState = softState
+	}
+	if !isHardStateEqual(hardState, rn.prevHardState) {
+		//todo为什么不需要修改prevHardState
+		//rn.prevHardState = hardState
+		rd.HardState = hardState
+	}
+	// 待发送的消息置为空
+	r.msgs = make([]pb.Message, 0)
+	return rd
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
+	r := rn.Raft
+	if !isSoftStateEqual(r.softState(), rn.prevSoftState) {
+		return true
+	}
+	if hardSt := r.hardState(); !IsEmptyHardState(hardSt) && !isHardStateEqual(hardSt, rn.prevHardState) {
+		return true
+	}
+	if len(r.RaftLog.unstableEntries()) > 0 || len(r.RaftLog.nextEnts()) > 0 || len(r.msgs) > 0 {
+		return true
+	}
+
 	return false
 }
 
 // Advance notifies the RawNode that the application has applied and saved progress in the
 // last Ready results.
+// Advance函数是当使用者已经将上一次Ready数据处理之后，调用该函数告诉raft库可以进行下一步的操作
 func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
+	if rd.SoftState != nil {
+		rn.prevSoftState = rd.SoftState
+	}
+	if !IsEmptyHardState(rd.HardState) {
+		rn.prevHardState = rd.HardState
+	}
+
+	if len(rd.Entries) > 0 {
+		e := rd.Entries[len(rd.Entries)-1]
+		rn.Raft.RaftLog.stabled = e.Index
+	}
+	if len(rd.CommittedEntries) > 0 {
+		e := rd.CommittedEntries[len(rd.CommittedEntries)-1]
+		rn.Raft.RaftLog.applied = e.Index
+	}
 }
 
 // GetProgress return the Progress of this node and its peers, if this
