@@ -91,7 +91,7 @@ type GlobalContext struct {
 	storeMeta            *storeMeta
 	snapMgr              *snap.SnapManager
 	router               *router
-	trans                Transport
+	trans                Transport // 使用`Transport`向其他 peers 发送 raft 消息
 	schedulerTaskSender  chan<- worker.Task
 	regionTaskSender     chan<- worker.Task
 	raftLogGCTaskSender  chan<- worker.Task
@@ -104,8 +104,8 @@ type Transport interface {
 	Send(msg *rspb.RaftMessage) error
 }
 
-/// loadPeers loads peers in this store. It scans the db engine, loads all regions and their peers from it
-/// WARN: This store should not be used before initialized.
+// / loadPeers loads peers in this store. It scans the db engine, loads all regions and their peers from it
+// / WARN: This store should not be used before initialized.
 func (bs *Raftstore) loadPeers() ([]*peer, error) {
 	// Scan region meta to get saved regions.
 	startKey := meta.RegionMetaMinKey
@@ -193,10 +193,10 @@ func (bs *Raftstore) clearStaleMeta(kvWB, raftWB *engine_util.WriteBatch, origin
 }
 
 type workers struct {
-	raftLogGCWorker  *worker.Worker
-	schedulerWorker  *worker.Worker
-	splitCheckWorker *worker.Worker
-	regionWorker     *worker.Worker
+	raftLogGCWorker  *worker.Worker //处理日志压缩
+	schedulerWorker  *worker.Worker //用于实际split命令的发送，也用于接受和处理心跳负荷调度
+	splitCheckWorker *worker.Worker //处理region split-check
+	regionWorker     *worker.Worker //处理快照
 	wg               *sync.WaitGroup
 }
 
@@ -204,7 +204,7 @@ type Raftstore struct {
 	ctx        *GlobalContext
 	storeState *storeState
 	router     *router
-	workers    *workers
+	workers    *workers //提供了四个用于异步处理的worker
 	tickDriver *tickDriver
 	closeCh    chan struct{}
 	wg         *sync.WaitGroup
@@ -266,6 +266,7 @@ func (bs *Raftstore) startWorkers(peers []*peer) {
 	workers := bs.workers
 	router := bs.router
 	bs.wg.Add(2) // raftWorker, storeWorker
+	// 启动一个RaftWorker和一个StoreWorker并发送对应start信息开始运行
 	rw := newRaftWorker(ctx, router)
 	go rw.run(bs.closeCh, bs.wg)
 	sw := newStoreWorker(ctx, bs.storeState)
@@ -275,12 +276,14 @@ func (bs *Raftstore) startWorkers(peers []*peer) {
 		regionID := peers[i].regionId
 		_ = router.send(regionID, message.Msg{RegionID: regionID, Type: message.MsgTypeStart})
 	}
+	// 启动了四个异步worker用于处理其他任务
 	engines := ctx.engine
 	cfg := ctx.cfg
 	workers.splitCheckWorker.Start(runner.NewSplitCheckHandler(engines.Kv, NewRaftstoreRouter(router), cfg))
 	workers.regionWorker.Start(runner.NewRegionTaskHandler(engines, ctx.snapMgr))
 	workers.raftLogGCWorker.Start(runner.NewRaftLogGCTaskHandler())
 	workers.schedulerWorker.Start(runner.NewSchedulerTaskHandler(ctx.store.Id, ctx.schedulerClient, NewRaftstoreRouter(router)))
+	// 另开一个线程用于推进逻辑时钟并发送相关信息
 	go bs.tickDriver.run()
 }
 

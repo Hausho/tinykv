@@ -66,6 +66,7 @@ func (t *ServerTransport) Resolve(storeID uint64, msg *raft_serverpb.RaftMessage
 }
 
 func (t *ServerTransport) WriteData(storeID uint64, addr string, msg *raft_serverpb.RaftMessage) {
+	// 截获 Snapshot 类型的消息，转而通过特殊的方式进行发送截获 Snapshot 类型的消息，转而通过特殊的方式进行发送
 	if msg.GetMessage().GetSnapshot() != nil {
 		t.SendSnapshotSock(addr, msg)
 		return
@@ -82,7 +83,10 @@ func (t *ServerTransport) SendSnapshotSock(addr string, msg *raft_serverpb.RaftM
 		toStoreID := msg.GetToPeer().GetStoreId()
 		log.Debugf("send snapshot. toPeerID: %v, toStoreID: %v, regionID: %v, status: %v", toPeerID, toStoreID, regionID, err)
 	}
-
+	// 这里简单地把对应的 RaftMessage包装成一个 SnapTask::Send任务，并将其交给独立的 snap-worker去处理
+	// 值得注意的是，这里的 RaftMessage只包含 Snapshot 的元信息，而不包括真正的快照数据
+	// TiKV 中有一个单独的模块叫做 SnapManager，用来专门处理数据快照的生成与转存，
+	// 稍后我们将会看到从 SnapManager模块读取 Snapshot 数据块并进行发送的相关代码
 	t.snapScheduler <- &sendSnapTask{
 		addr:     addr,
 		msg:      msg,

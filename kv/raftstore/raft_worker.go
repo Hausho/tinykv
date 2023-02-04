@@ -48,6 +48,7 @@ func (rw *raftWorker) run(closeCh <-chan struct{}, wg *sync.WaitGroup) {
 		peerStateMap := make(map[uint64]*peerState)
 		for _, msg := range msgs {
 			peerState := rw.getPeerState(peerStateMap, msg.RegionID)
+			// 没有在当前store找到需要操作的peer
 			if peerState == nil {
 				continue
 			}

@@ -18,6 +18,9 @@ type peerState struct {
 }
 
 // router routes a message to a peer.
+// 保存的是当前store的所有peer的信息
+// router作用1：接受其他节点的message 并路由到 指定region在本raftstore的peer
+// router作用2：向其他raftstore的peer发送信息
 type router struct {
 	peers       sync.Map // regionID -> peerState
 	peerSender  chan message.Msg
@@ -88,6 +91,7 @@ func (r *RaftstoreRouter) Send(regionID uint64, msg message.Msg) error {
 func (r *RaftstoreRouter) SendRaftMessage(msg *raft_serverpb.RaftMessage) error {
 	regionID := msg.RegionId
 	if r.router.send(regionID, message.NewPeerMsg(message.MsgTypeRaftMessage, regionID, msg)) != nil {
+		// MsgTypeStoreRaftMessage消息将raft消息包装到store中不存在的peer
 		r.router.sendStore(message.NewPeerMsg(message.MsgTypeStoreRaftMessage, regionID, msg))
 	}
 	return nil

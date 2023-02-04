@@ -50,6 +50,7 @@ type Ready struct {
 
 	// Entries specifies entries to be saved to stable storage BEFORE
 	// Messages are sent.
+	// Entries 指定在发送消息之前需要保存到稳定存储的条目（说明还没有保存到稳定存储）
 	Entries []pb.Entry
 
 	// Snapshot specifies the snapshot to be saved to stable storage.
@@ -58,12 +59,15 @@ type Ready struct {
 	// CommittedEntries specifies entries to be committed to a
 	// store/state-machine. These have previously been committed to stable
 	// store.
+	// CommittedEntries 指定提交到存储/状态机的entries。这些之前都被提交到稳定存储了
 	CommittedEntries []pb.Entry
 
 	// Messages specifies outbound messages to be sent AFTER Entries are
 	// committed to stable storage.
 	// If it contains a MessageType_MsgSnapshot message, the application MUST report back to raft
 	// when the snapshot has been received or has failed by calling ReportSnapshot.
+	// Messages 指定在条目被提交到稳定存储之后发送的出站消息，
+	// 如果它包含MessageType_MsgSnapshot消息，当快照已经被接收到或失败时，应用程序必须通过调用ReportSnapshot报告回raft，
 	Messages []pb.Message
 }
 
@@ -173,7 +177,8 @@ func (rn *RawNode) Ready() Ready {
 		rd.SoftState = softState
 	}
 	if !isHardStateEqual(hardState, rn.prevHardState) {
-		//todo为什么不需要修改prevHardState
+		//todo 为什么不需要修改prevHardState？
+		// 在Advance中更新prevHardState
 		//rn.prevHardState = hardState
 		rd.HardState = hardState
 	}
@@ -213,10 +218,12 @@ func (rn *RawNode) Advance(rd Ready) {
 
 	if len(rd.Entries) > 0 {
 		e := rd.Entries[len(rd.Entries)-1]
+		// 更新stabled
 		rn.Raft.RaftLog.stabled = e.Index
 	}
 	if len(rd.CommittedEntries) > 0 {
 		e := rd.CommittedEntries[len(rd.CommittedEntries)-1]
+		// 更新applied
 		rn.Raft.RaftLog.applied = e.Index
 	}
 }

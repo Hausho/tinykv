@@ -122,7 +122,7 @@ type Raft struct {
 	RaftLog *RaftLog
 
 	// log replication progress of each peers
-	Prs map[uint64]*Progress // 存储raft group其他节点的信息
+	Prs map[uint64]*Progress // 存储raft group其他节点(peers)的信息
 
 	// this peer's role
 	State StateType
@@ -194,6 +194,7 @@ func newRaft(c *Config) *Raft {
 			log.Panic("cannot specify both newRaft(peers) and ConfState.Nodes)")
 		}
 		peers = confState.Nodes
+		c.peers = peers
 	}
 
 	lastIndex := r.RaftLog.LastIndex()
@@ -746,6 +747,7 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 	}
 	if grant > threshold {
 		r.becomeLeader()
+		log.Infof("new leader:%d, current leader %d\n", r.Lead, r.id)
 	} else if votes-grant > threshold { // todo：不判断拒绝人数超过半数可以吗？
 		r.becomeFollower(r.Term, None)
 	}

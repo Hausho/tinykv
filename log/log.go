@@ -12,8 +12,10 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 const (
@@ -268,7 +270,17 @@ func LogTypeToString(t LogType) (string, string) {
 }
 
 func New() *Logger {
-	return NewLogger(os.Stderr, "")
+	//return NewLogger(os.Stderr, "")
+	rootPath := "/Users/orange/GolandProjects/tinykv"
+	logPath := filepath.Join(rootPath, "mylogs")
+
+	os.MkdirAll(logPath, os.ModePerm)
+	format := time.Now().Format("2006-01-02 15:04:05")
+	writer, err := os.OpenFile(filepath.Join(logPath, format), os.O_WRONLY|os.O_CREATE, 0755)
+	if err != nil {
+		panic("log writer error.")
+	}
+	return NewLogger(writer, "")
 }
 
 func NewLogger(w io.Writer, prefix string) *Logger {

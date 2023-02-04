@@ -59,7 +59,10 @@ func (r *snapRunner) send(t *sendSnapTask) {
 const snapChunkLen = 1024 * 1024
 
 func (r *snapRunner) sendSnap(addr string, msg *raft_serverpb.RaftMessage) error {
+	//然后将 RaftMessage和 Snap一起封装进 SnapChunk结构，最后创建全新的 gRPC 连接及一个 Snapshot stream 并将 SnapChunk写入。
+	//这里引入 SnapChunk是为了避免将整块 Snapshot 快照一次性加载进内存， 它 impl 了 futures::Stream这个 trait 来达成按需加载流式发送的效果。
 	start := time.Now()
+	// 1.先是用 Snapshot 元信息从 SnapManager取到待发送的快照数据，
 	msgSnap := msg.GetMessage().GetSnapshot()
 	snapKey, err := snap.SnapKeyFromSnap(msgSnap)
 	if err != nil {
@@ -77,6 +80,9 @@ func (r *snapRunner) sendSnap(addr string, msg *raft_serverpb.RaftMessage) error
 		return errors.Errorf("missing snap file: %v", snap.Path())
 	}
 
+	// 然后将 RaftMessage和 Snap一起封装进 SnapChunk结构
+	// 3. 最后创建全新的 gRPC 连接及一个 Snapshot stream 并将 SnapChunk写入。
+	// 这里引入 SnapChunk是为了避免将整块 Snapshot 快照一次性加载进内存， 它 impl 了 futures::Stream这个 trait 来达成按需加载流式发送的效果。
 	cc, err := grpc.Dial(addr, grpc.WithInsecure(),
 		grpc.WithInitialWindowSize(2*1024*1024),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
@@ -105,6 +111,7 @@ func (r *snapRunner) sendSnap(addr string, msg *raft_serverpb.RaftMessage) error
 		if err != nil {
 			return errors.Errorf("failed to read snapshot chunk: %v", err)
 		}
+		// 写入 SnapChunk
 		err = stream.Send(&raft_serverpb.SnapshotChunk{Data: buf})
 		if err != nil {
 			return err

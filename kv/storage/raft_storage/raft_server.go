@@ -186,6 +186,7 @@ func (rs *RaftStorage) Start() error {
 	resolveRunner := newResolverRunner(schedulerClient)
 	rs.resolveWorker.Start(resolveRunner)
 
+	// todo: 为什么这里的snap是放在跟raftstore同一级的？
 	rs.snapManager = snap.NewSnapManager(filepath.Join(cfg.DBPath, "snap"))
 	rs.snapWorker = worker.NewWorker("snap-worker", &rs.wg)
 	snapSender := rs.snapWorker.Sender()

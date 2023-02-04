@@ -44,6 +44,8 @@ var ErrSnapshotTemporarilyUnavailable = errors.New("snapshot is temporarily unav
 // If any Storage method returns an error, the raft instance will
 // become inoperable and refuse to participate in elections; the
 // application is responsible for cleanup and recovery in this case.
+// Storage 是应用程序可以实现的的接口，从storage中检索日志条目
+// 如果任何Storage方法返回错误，raft实例将变得不可操作并拒绝参与选举;在这种情况下，应用程序负责清理和恢复。
 type Storage interface {
 	// InitialState returns the saved HardState and ConfState information.
 	InitialState() (pb.HardState, pb.ConfState, error)
