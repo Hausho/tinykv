@@ -5,6 +5,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+	"reflect"
 	"time"
 
 	"github.com/Connor1996/badger/y"
@@ -54,7 +55,22 @@ func (d *peerMsgHandler) handleProposal(entry *eraftpb.Entry, handle func(*propo
 		d.proposals = d.proposals[1:]
 	}
 }
-
+func (d *peerMsgHandler) processAdminRequest(entry *eraftpb.Entry, msg *raft_cmdpb.RaftCmdRequest, wb *engine_util.WriteBatch) {
+	req := msg.AdminRequest
+	switch req.CmdType {
+	case raft_cmdpb.AdminCmdType_CompactLog:
+		compactLog := req.GetCompactLog()
+		applySt := d.peerStorage.applyState
+		// apply包含`AdminCmdType_CompactLog`的日志项
+		// 并修改`RaftApplyState`中的`RaftTruncatedState`的`index`和`term`（与消息中压缩位置匹配）
+		if compactLog.CompactIndex >= applySt.TruncatedState.Index {
+			applySt.TruncatedState.Index = compactLog.CompactIndex
+			applySt.TruncatedState.Term = compactLog.CompactTerm
+			wb.SetMeta(meta.ApplyStateKey(d.regionId), applySt)
+			d.ScheduleCompactLog(applySt.TruncatedState.Index)
+		}
+	}
+}
 func (d *peerMsgHandler) processRequest(entry *eraftpb.Entry, msg *raft_cmdpb.RaftCmdRequest, wb *engine_util.WriteBatch) *engine_util.WriteBatch {
 	req := msg.Requests[0]
 	key := getRequestKey(req)
@@ -76,7 +92,7 @@ func (d *peerMsgHandler) processRequest(entry *eraftpb.Entry, msg *raft_cmdpb.Ra
 		wb.DeleteCF(req.Delete.Cf, req.Delete.Key)
 	case raft_cmdpb.CmdType_Snap:
 	}
-	// response
+	// 生成response
 	d.handleProposal(entry, func(p *proposal) {
 		resp := &raft_cmdpb.RaftCmdResponse{Header: &raft_cmdpb.RaftResponseHeader{}}
 		switch req.CmdType {
@@ -120,6 +136,10 @@ func (d *peerMsgHandler) process(entry *eraftpb.Entry, wb *engine_util.WriteBatc
 	if len(msg.Requests) > 0 {
 		return d.processRequest(entry, msg, wb)
 	}
+	if msg.AdminRequest != nil {
+		d.processAdminRequest(entry, msg, wb)
+		return wb
+	}
 	// noop entry
 	return wb
 }
@@ -131,27 +151,42 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	// Your Code Here (2B/2C).
 	if d.RaftGroup.HasReady() {
 		rd := d.RaftGroup.Ready()
-		// 持久化RaftLog和RaftLocalState
-		_, err := d.peerStorage.SaveReadyState(&rd)
+		// 1.持久化RaftLog和RaftLocalState，还有处理快照
+		result, err := d.peerStorage.SaveReadyState(&rd)
 		if err != nil {
 			panic(err)
 		}
-		// 将raft中的消息转发出去，指定在条目被提交到稳定存储之后发送的出站消息
+		// ?干啥的
+		if result != nil {
+			if !reflect.DeepEqual(result.PrevRegion, result.Region) {
+				d.peerStorage.SetRegion(result.Region)
+				storeMeta := d.ctx.storeMeta
+				storeMeta.Lock()
+				storeMeta.regions[result.Region.Id] = result.Region
+				storeMeta.regionRanges.Delete(&regionItem{region: result.PrevRegion})
+				storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: result.Region})
+				storeMeta.Unlock()
+			}
+		}
+		// 2.将raft中的消息转发出去，指定在条目被提交到稳定存储之后发送的出站消息
 		d.Send(d.ctx.trans, rd.Messages)
-		// 将Snapshot(如果有)已提交的log entries应用到状态机
+		// 3.将Snapshot(如果有)已提交的log entries应用到状态机，并且通过cb回调让上层感知
 		if len(rd.CommittedEntries) > 0 {
 			oldProposals := d.proposals
 			kvWB := new(engine_util.WriteBatch)
 			for _, entry := range rd.CommittedEntries {
+				// 3.1 modify kvDB
 				kvWB = d.process(&entry, kvWB)
 				if d.stopped {
 					return
 				}
 			}
+			// 3.2 持久化RaftApplyState
 			d.peerStorage.applyState.AppliedIndex = rd.CommittedEntries[len(rd.CommittedEntries)-1].Index
-			// 持久化RaftApplyState
+			//
 			kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
 			kvWB.WriteToDB(d.peerStorage.Engines.Kv)
+			// 如果之前有未apply的命令，那么需要更新d.proposals为最新的未apply的，上面已经apply了一些
 			if len(oldProposals) > len(d.proposals) {
 				proposals := make([]*proposal, len(d.proposals))
 				copy(proposals, d.proposals)
@@ -237,13 +272,19 @@ func getRequestKey(req *raft_cmdpb.Request) []byte {
 	return key
 }
 
-func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
-	err := d.preProposeRaftCommand(msg)
-	if err != nil {
-		cb.Done(ErrResp(err))
-		return
+func (d *peerMsgHandler) proposeAdminRequest(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	req := msg.AdminRequest
+	switch req.CmdType {
+	case raft_cmdpb.AdminCmdType_CompactLog:
+		data, err := msg.Marshal()
+		if err != nil {
+			panic(err)
+		}
+		d.RaftGroup.Propose(data)
 	}
-	// Your Code Here (2B).
+}
+
+func (d *peerMsgHandler) proposeRequest(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
 	key := getRequestKey(msg.Requests[0])
 	// 要操作的key不在当前peer所在的region中
 	if key != nil {
@@ -258,9 +299,23 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		panic(err)
 	}
 	p := &proposal{index: d.nextProposalIndex(), term: d.Term(), cb: cb}
-	// peer还会在proposals数组中添加一个新的propose，表示此条指令已经被提交，等待应用
+	// peer还会在proposals数组中添加一个新的propose，表示此条指令已经被提交给raft（还未commit），等待应用
 	d.proposals = append(d.proposals, p)
 	d.RaftGroup.Propose(data)
+}
+
+func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	err := d.preProposeRaftCommand(msg)
+	if err != nil {
+		cb.Done(ErrResp(err))
+		return
+	}
+	// Your Code Here (2B).
+	if msg.AdminRequest != nil {
+		d.proposeAdminRequest(msg, cb)
+	} else {
+		d.proposeRequest(msg, cb)
+	}
 }
 
 func (d *peerMsgHandler) onTick() {
@@ -335,6 +390,7 @@ func (d *peerMsgHandler) onRaftMsg(msg *rspb.RaftMessage) error {
 		// delete them here. If the snapshot file will be reused when
 		// receiving, then it will fail to pass the check again, so
 		// missing snapshot files should not be noticed.
+		// 生成一个`recvSnapTask`请求到`snapWorker`中
 		s, err1 := d.ctx.snapMgr.GetSnapshotForApplying(*key)
 		if err1 != nil {
 			return err1

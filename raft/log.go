@@ -94,6 +94,15 @@ func newLog(storage Storage) *RaftLog {
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
+	first, _ := l.storage.FirstIndex()
+	if first > l.FirstIndex {
+		if len(l.entries) > 0 {
+			entries := l.entries[l.toSliceIndex(first):]
+			l.entries = make([]pb.Entry, len(entries))
+			copy(l.entries, entries)
+		}
+		l.FirstIndex = first
+	}
 }
 
 // allEntries return all the entries not compacted.
@@ -123,32 +132,38 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
 	var index uint64
-	if len(l.entries) > 0 { // 如果有未持久化的日志，返回未持久化日志的最后索引
-		index = l.entries[len(l.entries)-1].Index
-	} else { // 否则返回持久化日志的最后索引
-		index, _ = l.storage.LastIndex()
+	if !IsEmptySnap(l.pendingSnapshot) {
+		index = l.pendingSnapshot.Metadata.Index
 	}
-	return index
+	if len(l.entries) > 0 { // 如果有未持久化的日志，返回未持久化日志的最后索引
+		// 直接返回，如果不是直接返回TestSnapshotUnreliableRecoverConcurrentPartition2C会报错越界错误
+		// todo: why？
+		//index = max(l.entries[len(l.entries)-1].Index, index)
+		return max(l.entries[len(l.entries)-1].Index, index)
+	}
+	// 否则返回持久化日志的最后索引
+	i, _ := l.storage.LastIndex()
+	return max(i, index)
 }
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
+	// 在还未compact的entries中找得到
 	if len(l.entries) > 0 && i >= l.FirstIndex {
 		return l.entries[i-l.FirstIndex].Term, nil
 	}
-	return 0, nil
-	//term, err := l.storage.Term(i)
-	//if err == ErrUnavailable && !IsEmptySnap(l.pendingSnapshot) {
-	//	if i == l.pendingSnapshot.Metadata.Index {
-	//		term = l.pendingSnapshot.Metadata.Term
-	//		err = nil
-	//	} else if i < l.pendingSnapshot.Metadata.Index {
-	//		err = ErrCompacted
-	//	}
-	//}
-	//return term, err
-
+	// todo: RaftLog的entries是保存的是什么？？为什么找不到就去持久存储里面找
+	term, err := l.storage.Term(i)
+	if err == ErrUnavailable && !IsEmptySnap(l.pendingSnapshot) {
+		if i == l.pendingSnapshot.Metadata.Index {
+			term = l.pendingSnapshot.Metadata.Term
+			err = nil
+		} else if i < l.pendingSnapshot.Metadata.Index {
+			err = ErrCompacted
+		}
+	}
+	return term, err
 }
 
 // toSliceIndex return the idx of the given index in the entries

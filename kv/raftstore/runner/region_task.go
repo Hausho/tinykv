@@ -23,11 +23,13 @@ import (
 // `RegionTaskApply` which will apply a snapshot to the region that id equals RegionId,
 // `RegionTaskDestroy` which will clean up the key range from StartKey to EndKey.
 
+// RegionTaskGen 根据RegionId生成一个快照
 type RegionTaskGen struct {
 	RegionId uint64                   // specify the region which the task is for.
 	Notifier chan<- *eraftpb.Snapshot // when it finishes snapshot generating, it notifies notifier.
 }
 
+// RegionTaskApply 应用一个快照到id等于RegionId的区域
 type RegionTaskApply struct {
 	RegionId uint64                    // specify the region which the task is for.
 	Notifier chan<- bool               // when it finishes snapshot applying, it notifies notifier.
@@ -36,6 +38,7 @@ type RegionTaskApply struct {
 	EndKey   []byte
 }
 
+// RegionTaskDestroy 清除从StartKey到EndKey的键范围
 type RegionTaskDestroy struct {
 	RegionId uint64 // specify the region which the task is for.
 	StartKey []byte // `StartKey` and `EndKey` are used to destroy certain range of region.

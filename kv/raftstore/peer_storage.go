@@ -153,17 +153,20 @@ func (ps *PeerStorage) FirstIndex() (uint64, error) {
 
 func (ps *PeerStorage) Snapshot() (eraftpb.Snapshot, error) {
 	var snapshot eraftpb.Snapshot
+	// 检查有无生成中的快照
 	if ps.snapState.StateType == snap.SnapState_Generating {
 		select {
+		// 检查有无发送中的快照来确定快照是否生成完成
 		case s := <-ps.snapState.Receiver:
 			if s != nil {
 				snapshot = *s
 			}
 		default:
+			// 还没有生成好请求Snapshot的Peer应该暂时放弃请求，等待下一次请求
 			return snapshot, raft.ErrSnapshotTemporarilyUnavailable
 		}
 		ps.snapState.StateType = snap.SnapState_Relax
-		if snapshot.GetMetadata() != nil {
+		if snapshot.GetMetadata() != nil { // snapshot生成成功
 			ps.snapTriedCnt = 0
 			if ps.validateSnap(&snapshot) {
 				return snapshot, nil
@@ -173,6 +176,7 @@ func (ps *PeerStorage) Snapshot() (eraftpb.Snapshot, error) {
 		}
 	}
 
+	// 失败次数超过五次
 	if ps.snapTriedCnt >= 5 {
 		err := errors.Errorf("failed to get snapshot after %d times", ps.snapTriedCnt)
 		ps.snapTriedCnt = 0
@@ -187,6 +191,7 @@ func (ps *PeerStorage) Snapshot() (eraftpb.Snapshot, error) {
 		Receiver:  ch,
 	}
 	// schedule snapshot generate task
+	// 生成的过程由新建的 RegionTaskGen 创建任务，交由regionWorker处理
 	ps.regionSched <- &runner.RegionTaskGen{
 		RegionId: ps.region.GetId(),
 		Notifier: ch,
@@ -328,7 +333,7 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 	for _, entry := range entries {
 		raftWB.SetMeta(meta.RaftLogKey(regionId, entry.Index), &entry)
 	}
-	//删除之前已经append但是永远不会被提交的的日志条目？
+	//删除之前已经append但是永远不会被提交的的日志条目（可能是上一个任期残留的未apply的）
 	prevLast, _ := ps.LastIndex()
 	if prevLast > last {
 		for i := last + 1; i <= prevLast; i++ {
@@ -353,7 +358,37 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	// and send RegionTaskApply task to region worker through ps.regionSched, also remember call ps.clearMeta
 	// and ps.clearExtraData to delete stale data
 	// Your Code Here (2C).
-	return nil, nil
+	// 1. 通过 ps.clearMeta 和 ps.clearExtraData() 清除原来的数据，因为新的 snapshot 会包含新的 meta 信息，需要先清除旧的。
+	if ps.isInitialized() {
+		if err := ps.clearMeta(kvWB, raftWB); err != nil {
+			return nil, err
+		}
+		ps.clearExtraData(snapData.Region)
+	}
+
+	// 2. 根据 Snapshot 的 Metadata 信息更新当前的 raftState 和 applyState。并保存信息到 WriteBatch 中。
+	ps.raftState.LastIndex = snapshot.Metadata.Index
+	ps.raftState.LastTerm = snapshot.Metadata.Term
+	ps.applyState.AppliedIndex = snapshot.Metadata.Index
+	ps.applyState.TruncatedState.Index = snapshot.Metadata.Index
+	ps.applyState.TruncatedState.Term = snapshot.Metadata.Term
+	ps.snapState.StateType = snap.SnapState_Applying
+	kvWB.SetMeta(meta.ApplyStateKey(snapData.Region.GetId()), ps.applyState)
+
+	// 3. 发送 RegionTaskApply 到 regionSched 应用 snapshot。
+	ch := make(chan bool, 1)
+	ps.regionSched <- &runner.RegionTaskApply{
+		RegionId: snapData.Region.GetId(),
+		Notifier: ch,
+		SnapMeta: snapshot.Metadata,
+		StartKey: snapData.Region.GetStartKey(),
+		EndKey:   snapData.Region.GetEndKey(),
+	}
+	<-ch
+	result := &ApplySnapResult{PrevRegion: ps.region, Region: snapData.Region}
+	meta.WriteRegionState(kvWB, snapData.Region, rspb.PeerState_Normal)
+
+	return result, nil
 }
 
 // Save memory states to disk.
@@ -362,13 +397,24 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
 	raftWB := new(engine_util.WriteBatch)
+	// 处理快照信息
+	var result *ApplySnapResult
+	var err error
+	if !raft.IsEmptySnap(&ready.Snapshot) {
+		kvWB := new(engine_util.WriteBatch)
+		result, err = ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
+		kvWB.WriteToDB(ps.Engines.Kv)
+	}
+
+	// 持久化RaftLog和RaftLocalState
 	ps.Append(ready.Entries, raftWB)
 	if !raft.IsEmptyHardState(ready.HardState) {
 		ps.raftState.HardState = &ready.HardState
 	}
 	raftWB.SetMeta(meta.RaftStateKey(ps.region.GetId()), ps.raftState)
 	raftWB.WriteToDB(ps.Engines.Raft)
-	return nil, nil
+
+	return result, err
 }
 
 func (ps *PeerStorage) ClearData() {

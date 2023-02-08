@@ -184,6 +184,12 @@ func (rn *RawNode) Ready() Ready {
 	}
 	// 待发送的消息置为空
 	r.msgs = make([]pb.Message, 0)
+
+	if !IsEmptySnap(r.RaftLog.pendingSnapshot) {
+		rd.Snapshot = *r.RaftLog.pendingSnapshot
+		r.RaftLog.pendingSnapshot = nil
+	}
+
 	return rd
 }
 
@@ -226,6 +232,7 @@ func (rn *RawNode) Advance(rd Ready) {
 		// 更新applied
 		rn.Raft.RaftLog.applied = e.Index
 	}
+	rn.Raft.RaftLog.maybeCompact()
 }
 
 // GetProgress return the Progress of this node and its peers, if this

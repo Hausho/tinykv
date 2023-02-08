@@ -45,6 +45,7 @@ type SnapStats struct {
 	SendingCount   int
 }
 
+// SnapManager 用来专门处理数据快照的生成与转存
 type SnapManager struct {
 	base         string
 	snapSize     *int64
