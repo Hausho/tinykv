@@ -249,5 +249,7 @@ func (rn *RawNode) GetProgress() map[uint64]Progress {
 
 // TransferLeader tries to transfer leadership to the given transferee.
 func (rn *RawNode) TransferLeader(transferee uint64) {
+	// `TransferLeader` 实际上是一个不需要复制给其他peer的动作
+	// 所以上层只需要调用 `RawNode` 的`TransferLeader()`方法而不是`Propose()` 来执行
 	_ = rn.Raft.Step(pb.Message{MsgType: pb.MessageType_MsgTransferLeader, From: transferee})
 }

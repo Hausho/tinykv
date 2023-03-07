@@ -870,6 +870,7 @@ func (r *Raft) addNode(id uint64) {
 	if _, ok := r.Prs[id]; !ok {
 		r.Prs[id] = &Progress{Next: 1}
 	}
+	// 清除 PendingConfIndex 表示当前没有未完成的配置更新
 	r.PendingConfIndex = None
 }
 

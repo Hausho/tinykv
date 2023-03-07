@@ -149,6 +149,8 @@ func (l *RaftLog) LastIndex() uint64 {
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
+	//log2.Debugf("Term: i = %d, FirstIndex = %d, l.entries = %s",
+	//	i, l.FirstIndex, l.entries)
 	// 在还未compact的entries中找得到
 	if len(l.entries) > 0 && i >= l.FirstIndex {
 		return l.entries[i-l.FirstIndex].Term, nil
